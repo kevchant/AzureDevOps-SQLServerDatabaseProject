@@ -1,0 +1,129 @@
+# Basic example of how to deploy to an Azure SQL Database
+# In this example I use a Microsoft-hosted agent.
+# A self-hosted one can be used if network connectivity exists between the agent and the Azure SQL database.
+# In this example SQL authentication is used to connect to the Azure SQL Database.
+# For this pipeline you also need to setup the below pipeline variables
+  # azuresubscription - The Azure subscription you use, 
+    # either it's full name or a service connection
+    # However, if using the full name for the variable it cannot be secret
+    # You will also need to give your pipeline permission when you first run it
+  # servername - The name of the logical SQL Server in Azure that the Azure SQL Database is in  
+  # database - The Azure SQL Database you want the update deployed to
+  # sqluser - User name to connect to the logical Azure SQL Server, try and keep this secret
+  # sqlpw - Password of above user, definitely keep this one secret
+
+# I set these global variables as examples, feel free to change them
+variables:
+  configuration: release
+  artifactname: AzureSQLDacpac 
+
+# Note that I have set the trigger below to exclude main
+# Otherwise the pipeline will try and run in Azure DevOps if added
+# To set it to run when the branch is updated change the setting from exclude to include
+trigger:
+  branches:
+    exclude:
+    - main
+
+# I have set this to use the latest windows image that is approved
+pool: 
+  vmImage: 'windows-latest'
+
+stages:
+
+- stage: BuildArtifact
+  displayName: 'Build Azure SQL Database artifact'
+  jobs:
+    - job: 'BuildArtifact'
+      displayName: 'Build artifact for Azure SQL Database'  
+      variables:
+        variables:
+        stagingarea: $(Build.ArtifactStagingDirectory)\staging
+
+      steps:
+      # To use a SQL Server 2019 database project to create a dacpac for Azure SQL Database
+      # we have a couple of options.
+      # In this example we will change the target platform, however you can change project to ignore errors
+      # I will show here how to do this a scaleable way.
+
+      # First we have to copy the SQL Server 2019 project to a staging area
+      - task: CopyFiles@2
+        displayName: "Copy files to a staging area in artifacts directory"
+        # Copies the file to a sub folder in the artifacts directory
+        inputs:
+          Contents: |
+            **
+          TargetFolder: '$(stagingarea)'
+          FlattenFolders: false
+          OverWrite: true
+
+      # After copying the project to a staging area we can securely change the sqlproj file
+      # So that the target platform is for Azure SQL Database instead
+      # We can also rename the copied sqlproj file for certainty
+      - task: PowerShell@2
+        displayName: "Runs PowerShell to replace DSP"
+        # Renames the .sqlproj file
+        # Followed by the PowerShell to replace the Database Schema Provider
+        inputs:
+          targetType: 'inline'
+          script: |
+            # Write your PowerShell commands here.
+            
+            cd..
+            ls
+            cd a\staging
+           
+            $Old_DSP = 'Microsoft.Data.Tools.Schema.Sql.Sql150DatabaseSchemaProvider'
+            $New_DSP = 'Microsoft.Data.Tools.Schema.Sql.SqlAzureV12DatabaseSchemaProvider'
+            
+            rename-item SQLdbproject.sqlproj AzureSQLDB.sqlproj
+            
+            (Get-Content "AzureSQLDB.sqlproj") -replace $Old_DSP, $New_DSP  | Set-Content "AzureSQLDB.sqlproj"
+
+      # We then build the copied database project
+      - task: VSBuild@1
+        displayName: 'Build Azure SQL Database artifact'
+        inputs:
+          solution: $(stagingarea)\AzureSQLDB.sqlproj
+          configuration: $(configuration)
+
+      # Finally we publish the new artifact that's in the copied location
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish Azure SQL Database artifact'
+        inputs:
+          PathtoPublish: '$(stagingarea)\bin\$(configuration)'
+          ArtifactName: $(artifactname)
+          publishLocation: 'Container'
+
+- stage: Release
+  dependsOn: BuildArtifact
+  displayName: 'Deploy Azure SQL Database dacpac'
+
+  jobs:
+    - job: 'DeployAzureSQLDB'
+      displayName: 'Deploy Azure SQL Database dacpac'
+      # As you can see below, you can also set variables locally in jobs
+      variables:
+        variables:
+        dacpacpath: $(System.ArtifactsDirectory)\$(artifactname)\AzureSQLDB.dacpac
+
+      steps:
+      - task: DownloadBuildArtifacts@0
+        displayName: 'Download Artifacts'
+        inputs:
+          buildType: 'current'
+          downloadType: 'specific'
+          downloadPath: '$(System.ArtifactsDirectory)'
+
+      - task: SqlAzureDacpacDeployment@1
+        displayName: 'Install dacpac'
+        inputs:
+          azureSubscription: '$(azuresubscription)'
+          AuthenticationType: 'server'
+          ServerName: $(servername)
+          DatabaseName: $(database)
+          SqlUsername: $(sqluser)
+          SqlPassword: $(sqlpw)
+          deployType: 'DacpacTask'
+          DeploymentAction: 'Publish'
+          DacpacFile: $(dacpacpath)

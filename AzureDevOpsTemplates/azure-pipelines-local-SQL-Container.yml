@@ -1,0 +1,84 @@
+# Sample of how to install to a local container
+# You need a self-hosted agent installed locally for this to work
+# For this pipeline you also need to setup the below pipeline variables
+  # agentpool - The name of the pool your local Azure DevOps Agent has been setup in
+  # servername - The name of the local SQL Server instance you want to connect to
+    # For a local Docker container you will need to specify the port as well (e.g. localhost,1443)
+  # database - The SQL Server database you want the update deployed to
+  # sqluser - User name to connect to SQL Server, try and keep this secret
+  # sqlpw - Password of above user, definitely keep this one secret
+
+# I set these global variables as examples, feel free to change them
+variables:
+  configuration: release
+  artifactname: SQLDacPac 
+
+# Note that I have set the trigger below to exclude main
+# Otherwise the pipeline will try and run in Azure DevOps if added
+# To set it to run when the branch is updated change the setting from exclude to include
+trigger:
+  branches:
+    exclude:
+    - main
+
+# This is the name of the pool you have setup your local Azure DevOps Agent in
+pool: 
+  name: $(agentpool)
+
+stages:
+
+- stage: BuildArtifact
+  displayName: 'Build SQL 2019 artifact'
+  jobs:
+    - job: 'BuildArtifact'
+      displayName: 'Build artifact for SQL Server 2019'  
+
+      steps:
+      - task: VSBuild@1
+        displayName: 'Build SQL 2019 artifact'
+        inputs:
+          solution: SQLdbproject.sqlproj
+          configuration: $(configuration)
+
+
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish SQL Server 2019 artifact'
+        inputs:
+          PathtoPublish: 'bin\$(configuration)'
+          ArtifactName: $(artifactname)
+          publishLocation: 'Container'
+
+#HERE!!!
+- stage: Release
+  dependsOn: BuildArtifact
+  displayName: 'Deploy SQL 2019 dacpac'
+
+  jobs:
+    - job: 'Deploy2019'
+      displayName: 'Deploy SQL Server 2019 dacpac'
+      # As you can see below, you can also set variables locally in jobs
+      variables:
+        variables:
+        dacpacpath: $(System.ArtifactsDirectory)\$(artifactname)
+        datadacpacfile: SQLdbproject.dacpac
+
+      steps:
+      - task: DownloadBuildArtifacts@0
+        displayName: 'Dowload Artifacts'
+        inputs:
+          buildType: 'current'
+          downloadType: 'specific'
+          downloadPath: '$(System.ArtifactsDirectory)'
+
+      - task: SqlDacpacDeploymentOnMachineGroup@0
+        displayName: 'Install DACPAC'
+        inputs:
+          TaskType: 'dacpac'
+          DacpacFile: '$(dacpacpath)\$(datadacpacfile)'
+          TargetMethod: 'server'
+          ServerName: $(servername)
+          DatabaseName: $(database)
+          AuthScheme: 'sqlServerAuthentication'
+          SqlUsername: $(sqluser)
+          SqlPassword: $(sqlpw)
+          AdditionalArguments: '/p:IncludeCompositeObjects=true'

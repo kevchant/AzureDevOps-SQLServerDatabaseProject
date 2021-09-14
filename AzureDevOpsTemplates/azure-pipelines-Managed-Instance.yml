@@ -1,0 +1,89 @@
+# Sample of how to install to an Azure SQL Managed Instance
+# In this example I use a Microsoft-hosted agent.
+# A self-hosted one can be used if network connectivity exists between the agent and the Azure SQL database.
+# In this example SQL authentication is used to connect to the Azure SQL Database.
+# For this pipeline you also need to setup the below pipeline variables
+  # azuresubscription - The Azure subscription you use, 
+    # either it's full name or a service connection
+    # However, if using the full name for the variable it cannot be secret
+    # You will also need to give your pipeline permission when you first run it
+  # servername - The endpoint you use to connect to your Managed Instance  
+   # If using public endpoint remember to add the port number on the end (usually 3342)
+  # database - The Database in your Managed Instance you want the update deployed to
+  # sqluser - User name to connect to the Azure SQL Managed Instance, try and keep this secret
+  # sqlpw - Password of above user, definitely keep this one secret
+
+# I set these global variables as examples, feel free to change them
+variables:
+  configuration: release
+  artifactname: SQLDacPac 
+
+# Note that I have set the trigger below to exclude main
+# Otherwise the pipeline will try and run in Azure DevOps if added
+# To set it to run when the branch is updated change the setting from exclude to include
+trigger:
+  branches:
+    exclude:
+    - main
+
+# This is the name of the pool you have setup your local Azure DevOps Agent in
+pool: 
+  name: $(agentpool)
+
+stages:
+
+- stage: BuildArtifact
+  displayName: 'Build SQL 2019 artifact'
+  jobs:
+    - job: 'BuildArtifact'
+      displayName: 'Build artifact for SQL Server 2019'  
+
+      steps:
+      - task: VSBuild@1
+        displayName: 'Build SQL 2019 artifact'
+        inputs:
+          solution: SQLdbproject.sqlproj
+          configuration: $(configuration)
+
+
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish SQL Server 2019 artifact'
+        inputs:
+          PathtoPublish: 'bin\$(configuration)'
+          ArtifactName: $(artifactname)
+          publishLocation: 'Container'
+
+# Because Azure SQL Managed Instance supports the SQL Server 2019 target platform we can just deploy it
+
+- stage: Release
+  dependsOn: BuildArtifact
+  displayName: 'Deploy SQL Server 2019 dacpac on Azure SQL Managed Instance'
+
+  jobs:
+    - job: 'DeployAzureSQLDB'
+      displayName: 'Deploy to Azure SQL Managed Instance'
+      # As you can see below, you can also set variables locally in jobs
+      variables:
+        variables:
+        dacpacpath: $(System.ArtifactsDirectory)\$(artifactname)\SQLdbproject.dacpac
+
+      steps:
+      - task: DownloadBuildArtifacts@0
+        displayName: 'Download Artifacts'
+        inputs:
+          buildType: 'current'
+          downloadType: 'specific'
+          downloadPath: '$(System.ArtifactsDirectory)'
+
+      - task: SqlAzureDacpacDeployment@1
+        displayName: 'Install dacpac'
+        inputs:
+          azureSubscription: '$(azuresubscription)'
+          AuthenticationType: 'server'
+          ServerName: $(servername)
+          DatabaseName: $(database)
+          SqlUsername: $(sqluser)
+          SqlPassword: $(sqlpw)
+          deployType: 'DacpacTask'
+          DeploymentAction: 'Publish'
+          DacpacFile: $(dacpacpath)
